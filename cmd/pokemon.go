@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -30,53 +31,34 @@ type PokemonStat struct {
 	} `json:"stat"`
 }
 
-// addCmd represents the add command
 var pokemonCmd = &cobra.Command{
 	Use:   "pokemon",
 	Short: "Fetch a pokemon's data",
 	Long:  `Fetch a pokemon's data by using name or id number`,
 	Run: func(cmd *cobra.Command, args []string) {
-		//if a command has any flags, get them here like the example below
-		//the flag can be processed here or passed to the next function
-		//you can run mutilple funtions
-		// fstatus, _ := cmd.Flags().GetBool("float")
 
-		//use this to get the full map/struct of the args
-		// cmdflags := cmd.Flags()
-		// fmt.Println(cmdflags)
-		// cmdArgs := cmd.Flags().Args()
-		// fmt.Println(cmdArgs)
-
-		//using getstring
 		nameOrId, _ := cmd.Flags().GetString("query")
 
 		if len(nameOrId) == 0 {
 			fmt.Println("Please enter a pokemon name or id number.")
 		} else {
-			searchPokemon(nameOrId)
+			SearchPokemon(nameOrId)
 		}
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(pokemonCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// addCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// addCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
-
-	//make the name flag required
 	pokemonCmd.Flags().StringP("query", "q", "", "Name or id number of the pokemon.")
 }
 
-func searchPokemon(nameOrId string) {
-	pokemon := CallPokemonApi(nameOrId)
+func SearchPokemon(nameOrId string) {
+	pokemon, err := CallPokemonApi(nameOrId)
+
+	if err != nil {
+		fmt.Println("An error occured:", err)
+		return
+	}
 
 	fmt.Printf("Id: %d\n", pokemon.Id)
 	fmt.Printf("Name: %s\n", pokemon.Name)
@@ -95,7 +77,7 @@ func searchPokemon(nameOrId string) {
 	}
 }
 
-func CallPokemonApi(nameOrId string) PokemonData {
+func CallPokemonApi(nameOrId string) (PokemonData, error) {
 	client := &http.Client{}
 	apiUrl := "https://pokeapi.co/api/v2/pokemon/" + nameOrId
 	req, err := http.NewRequest("GET", apiUrl, nil)
@@ -114,14 +96,23 @@ func CallPokemonApi(nameOrId string) PokemonData {
 		fmt.Print(err.Error())
 	}
 
+	var pokemon PokemonData
+
+	if resp.StatusCode != 200 {
+		respErr := errors.New("Something wrong, please try again later.")
+		if resp.StatusCode == 404 {
+			respErr = errors.New("No pokemon is found.")
+		}
+		return pokemon, respErr
+	}
+
 	bodyBytes, err := ioutil.ReadAll(resp.Body)
 
 	if err != nil {
 		fmt.Print(err.Error())
 	}
 
-	var pokemon PokemonData
 	json.Unmarshal(bodyBytes, &pokemon)
 
-	return pokemon
+	return pokemon, nil
 }
