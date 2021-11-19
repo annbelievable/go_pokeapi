@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"sync"
 
 	"github.com/spf13/cobra"
 )
@@ -29,6 +30,38 @@ type PokemonStat struct {
 	StatStruct struct {
 		StatName string `json:"name"`
 	} `json:"stat"`
+}
+
+type EncoutersData []EncouterData
+
+type EncouterData struct {
+	LocationArea struct {
+		Name string `json:"name"`
+		Url  string `json:"url"`
+	} `json:"location_area"`
+	VersionData []struct {
+		EncounterDetails []EncounterDetail `json:"encounter_details"`
+	} `json:"version_details"`
+}
+
+type EncounterDetail struct {
+	Method struct {
+		Name string `json:"name"`
+		Url  string `json:"url"`
+	} `json:"method"`
+}
+
+type LocationArea struct {
+	Location struct {
+		Name string `json:"name"`
+		Url  string `json:"url"`
+	} `json:"location"`
+}
+
+type Location struct {
+	Region struct {
+		Name string `json:"name"`
+	} `json:"region"`
 }
 
 var pokemonCmd = &cobra.Command{
@@ -75,15 +108,123 @@ func SearchPokemon(nameOrId string) {
 	for i := 0; i < len(pokemon.Stats); i++ {
 		fmt.Printf("%s: %d\n", pokemon.Stats[i].StatStruct.StatName, pokemon.Stats[i].StatNumber)
 	}
+
+	if len(pokemon.EncounterUrl) > 0 {
+		fmt.Println("Encounter locations and methods:")
+		encounterLocation := GetEncounterLocation(pokemon.EncounterUrl)
+		if encounterLocation != "" {
+			fmt.Print(encounterLocation)
+		} else {
+			fmt.Print("-")
+		}
+
+	}
 }
 
 func CallPokemonApi(nameOrId string) (PokemonData, error) {
-	client := &http.Client{}
+	var pokemon PokemonData
 	apiUrl := "https://pokeapi.co/api/v2/pokemon/" + nameOrId
+
+	bodyBytes, err := CallApi(apiUrl)
+
+	if err != nil {
+		return pokemon, err
+	}
+
+	json.Unmarshal(bodyBytes, &pokemon)
+
+	return pokemon, nil
+}
+
+func GetEncounterLocation(encounterUrl string) string {
+	encounterBytes, err := CallApi(encounterUrl)
+
+	if err != nil {
+		return ""
+	}
+
+	var encounters EncoutersData
+	json.Unmarshal(encounterBytes, &encounters)
+	result := ""
+
+	var wg sync.WaitGroup
+	ch := make(chan string)
+	for _, encounter := range encounters {
+		wg.Add(1)
+		go CallLocationApi(ch, encounter, &wg)
+	}
+
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	for {
+		res, ok := <-ch
+		if ok == false {
+			break
+		}
+		result += res
+	}
+
+	return result
+}
+
+func CallLocationApi(ch chan string, encounter EncouterData, wg *sync.WaitGroup) {
+	defer wg.Done()
+	locationAreaBytes, err := CallApi(encounter.LocationArea.Url)
+
+	if err != nil {
+		return
+	}
+
+	var locationArea LocationArea
+	json.Unmarshal(locationAreaBytes, &locationArea)
+	locationBytes, err := CallApi(locationArea.Location.Url)
+
+	if err != nil {
+		return
+	}
+
+	var location Location
+	json.Unmarshal(locationBytes, &location)
+
+	if location.Region.Name != "kanto" {
+		return
+	}
+
+	var methods = make(map[string]bool)
+	for _, version := range encounter.VersionData {
+		for _, detail := range version.EncounterDetails {
+			_, ok := methods[detail.Method.Name]
+			if !ok {
+				methods[detail.Method.Name] = true
+			}
+		}
+	}
+
+	result := "    " + encounter.LocationArea.Name + " - "
+	methodIx := 0
+	methodsLen := len(methods)
+	for key, _ := range methods {
+		result += key
+		methodIx++
+		if methodIx != methodsLen {
+			result += ", "
+		}
+	}
+	result += "\n"
+
+	ch <- result
+}
+
+//a generic call api method that returns bytes
+func CallApi(apiUrl string) ([]byte, error) {
+	client := &http.Client{}
 	req, err := http.NewRequest("GET", apiUrl, nil)
 
 	if err != nil {
-		fmt.Print(err.Error())
+		return nil, err
 	}
 
 	req.Header.Add("Accept", "application/json")
@@ -93,26 +234,22 @@ func CallPokemonApi(nameOrId string) (PokemonData, error) {
 	defer resp.Body.Close()
 
 	if err != nil {
-		fmt.Print(err.Error())
+		return nil, err
 	}
 
-	var pokemon PokemonData
+	if resp.StatusCode == 404 {
+		return nil, errors.New("No result is found.")
+	}
 
 	if resp.StatusCode != 200 {
-		respErr := errors.New("Something wrong, please try again later.")
-		if resp.StatusCode == 404 {
-			respErr = errors.New("No pokemon is found.")
-		}
-		return pokemon, respErr
+		return nil, errors.New("Something wrong, please try again later.")
 	}
 
 	bodyBytes, err := ioutil.ReadAll(resp.Body)
 
 	if err != nil {
-		fmt.Print(err.Error())
+		return nil, err
 	}
 
-	json.Unmarshal(bodyBytes, &pokemon)
-
-	return pokemon, nil
+	return bodyBytes, nil
 }
