@@ -46,6 +46,20 @@ func init() {
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+
+	_, err := os.Stat("cache.txt")
+
+	if err != nil {
+		if os.IsNotExist(err) {
+			file, err := os.Create("cache.txt")
+			if err != nil {
+				fmt.Println(err.Error())
+			}
+			file.Close()
+		} else {
+			fmt.Println(err)
+		}
+	}
 }
 
 // initConfig reads in config file and ENV variables if set.

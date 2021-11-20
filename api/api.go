@@ -1,15 +1,20 @@
 package api
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
+	"time"
 )
 
-type PokemonData struct {
+type Pokemon struct {
 	Id           int           `json:"id"`
 	Name         string        `json:"name"`
 	EncounterUrl string        `json:"location_area_encounters"`
@@ -30,9 +35,9 @@ type PokemonStat struct {
 	} `json:"stat"`
 }
 
-type EncoutersData []EncouterData
+type Encouters []Encouter
 
-type EncouterData struct {
+type Encouter struct {
 	LocationArea struct {
 		Name string `json:"name"`
 		Url  string `json:"url"`
@@ -62,72 +67,210 @@ type Location struct {
 	} `json:"region"`
 }
 
+type PokeCache struct {
+	Id         int       `json:"id"`
+	Name       string    `json:"name"`
+	Types      []string  `json:"types"`
+	Stats      []string  `json:"stats"`
+	Encounters []string  `json:"encounters"`
+	Date       time.Time `json:"date"`
+}
+
+type Error string
+
+func (e Error) Error() string { return string(e) }
+
+const (
+	noResultErr   = Error("No result is found.")
+	cacheFile     = "cache.txt"
+	kantoRegion   = "kanto"
+	pokemonApiUrl = "https://pokeapi.co/api/v2/pokemon/"
+)
+
 func SearchPokemon(nameOrId string) {
-	pokemon, err := CallPokemonApi(nameOrId)
+	cache, err := GetCachedResult(nameOrId)
 
 	if err != nil {
-		fmt.Println("An error occured:", err)
-		return
-	}
-
-	fmt.Printf("Id: %d\n", pokemon.Id)
-	fmt.Printf("Name: %s\n", pokemon.Name)
-
-	fmt.Printf("Type: ")
-	for i := 0; i < len(pokemon.Types); i++ {
-		fmt.Printf("%s", pokemon.Types[i].Type.Name)
-		if i < len(pokemon.Types)-1 {
-			fmt.Print(", ")
-		}
-	}
-	fmt.Println()
-
-	for i := 0; i < len(pokemon.Stats); i++ {
-		fmt.Printf("%s: %d\n", pokemon.Stats[i].StatStruct.StatName, pokemon.Stats[i].StatNumber)
-	}
-
-	if len(pokemon.EncounterUrl) > 0 {
-		fmt.Println("Encounter locations and methods:")
-		encounterLocation := GetEncounterLocation(pokemon.EncounterUrl)
-		if encounterLocation != "" {
-			fmt.Print(encounterLocation)
+		if err == noResultErr {
+			newCache, err := CallPokemonApi(nameOrId)
+			if err != nil {
+				fmt.Println("An error occured:", err)
+				return
+			}
+			go CacheResult(newCache)
+			PrintResult(newCache)
+			return
 		} else {
-			fmt.Print("-")
+			fmt.Println(err)
+			return
 		}
+	}
+
+	if MoreThanAWeek(cache.Date) {
+		newCache, err := CallPokemonApi(nameOrId)
+		if err != nil {
+			fmt.Println("An error occured:", err)
+			return
+		}
+		go UpdateCache(cache, newCache)
+		PrintResult(newCache)
+		return
+	} else {
+		PrintResult(cache)
+		return
 	}
 }
 
-func CallPokemonApi(nameOrId string) (PokemonData, error) {
-	var pokemon PokemonData
-	apiUrl := "https://pokeapi.co/api/v2/pokemon/" + nameOrId
+func PrintResult(cache PokeCache) {
+	fmt.Println("Id:", cache.Id)
+	fmt.Println("Name:", cache.Name)
 
+	fmt.Print("Types: ")
+	for _, ctype := range cache.Types {
+		fmt.Print(ctype)
+	}
+	fmt.Println()
+
+	for _, stat := range cache.Stats {
+		fmt.Println(stat)
+	}
+
+	fmt.Print("Encounter locations and methods:")
+	if len(cache.Encounters) > 0 {
+		fmt.Println()
+		for _, encounter := range cache.Encounters {
+			fmt.Println("  ", encounter)
+		}
+	} else {
+		fmt.Printf(" -\n")
+	}
+}
+
+func GetCachedResult(nameOrId string) (PokeCache, error) {
+	var cache PokeCache
+	f, err := os.Open(cacheFile)
+	defer f.Close()
+
+	if err != nil {
+		return cache, err
+	}
+
+	scanner := bufio.NewScanner(f)
+
+	for scanner.Scan() {
+		bytes := scanner.Bytes()
+		json.Unmarshal(bytes, &cache)
+		if nameOrId == fmt.Sprintf("%d", cache.Id) || nameOrId == cache.Name {
+			return cache, nil
+		}
+	}
+
+	return PokeCache{}, noResultErr
+}
+
+func CacheResult(cache PokeCache) {
+	f, err := os.OpenFile(cacheFile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Println(err)
+	}
+
+	bytes, err := json.Marshal(cache)
+	if err != nil {
+		log.Println(err)
+	}
+
+	_, err = fmt.Fprintln(f, string(bytes))
+	if err != nil {
+		log.Println(err)
+	}
+}
+
+func UpdateCache(oldCache, newCache PokeCache) {
+	input, err := ioutil.ReadFile(cacheFile)
+	if err != nil {
+		log.Println(err)
+	}
+
+	lines := strings.Split(string(input), "\n")
+
+	oldBytes, err := json.Marshal(oldCache)
+	if err != nil {
+		log.Println(err)
+	}
+
+	newBytes, err := json.Marshal(newCache)
+	if err != nil {
+		log.Println(err)
+	}
+
+	for i, line := range lines {
+		if line == string(oldBytes) {
+			lines[i] = string(newBytes)
+		}
+	}
+
+	output := strings.Join(lines, "\n")
+	err = ioutil.WriteFile(cacheFile, []byte(output), 0644)
+	if err != nil {
+		log.Println(err)
+	}
+}
+
+func MoreThanAWeek(dt time.Time) bool {
+	return int(time.Now().Sub(dt).Hours()/24) > 7
+}
+
+func CallPokemonApi(nameOrId string) (PokeCache, error) {
+	var pokemon Pokemon
+	apiUrl := pokemonApiUrl + nameOrId
 	bodyBytes, err := CallApi(apiUrl)
 
 	if err != nil {
-		return pokemon, err
+		return PokeCache{}, err
 	}
 
 	json.Unmarshal(bodyBytes, &pokemon)
 
-	return pokemon, nil
+	cache := PokeCache{
+		Id:         pokemon.Id,
+		Name:       pokemon.Name,
+		Types:      []string{},
+		Stats:      []string{},
+		Encounters: []string{},
+		Date:       time.Now(),
+	}
+
+	for _, pokeType := range pokemon.Types {
+		cache.Types = append(cache.Types, pokeType.Type.Name)
+	}
+
+	for _, pokeStat := range pokemon.Stats {
+		formattedStats := fmt.Sprintf("%s: %d", pokeStat.StatStruct.StatName, pokeStat.StatNumber)
+		cache.Stats = append(cache.Stats, formattedStats)
+	}
+
+	if len(pokemon.EncounterUrl) > 0 {
+		cache.Encounters = GetEncounterLocation(pokemon.EncounterUrl)
+	}
+
+	return cache, nil
 }
 
-func GetEncounterLocation(encounterUrl string) string {
+func GetEncounterLocation(encounterUrl string) []string {
 	encounterBytes, err := CallApi(encounterUrl)
 
 	if err != nil {
-		return ""
+		return []string{"-"}
 	}
 
-	var encounters EncoutersData
+	var encounters Encouters
 	json.Unmarshal(encounterBytes, &encounters)
-	result := ""
 
 	var wg sync.WaitGroup
 	ch := make(chan string)
 	for _, encounter := range encounters {
 		wg.Add(1)
-		go CallLocationApi(ch, encounter, &wg)
+		go GetKantoEncounterLocation(ch, encounter, &wg)
 	}
 
 	go func() {
@@ -135,18 +278,19 @@ func GetEncounterLocation(encounterUrl string) string {
 		close(ch)
 	}()
 
+	result := []string{}
 	for {
 		res, ok := <-ch
 		if ok == false {
 			break
 		}
-		result += res
+		result = append(result, res)
 	}
 
 	return result
 }
 
-func CallLocationApi(ch chan string, encounter EncouterData, wg *sync.WaitGroup) {
+func GetKantoEncounterLocation(ch chan string, encounter Encouter, wg *sync.WaitGroup) {
 	defer wg.Done()
 	locationAreaBytes, err := CallApi(encounter.LocationArea.Url)
 
@@ -165,7 +309,7 @@ func CallLocationApi(ch chan string, encounter EncouterData, wg *sync.WaitGroup)
 	var location Location
 	json.Unmarshal(locationBytes, &location)
 
-	if location.Region.Name != "kanto" {
+	if location.Region.Name != kantoRegion {
 		return
 	}
 
@@ -179,7 +323,8 @@ func CallLocationApi(ch chan string, encounter EncouterData, wg *sync.WaitGroup)
 		}
 	}
 
-	result := "    " + encounter.LocationArea.Name + " - "
+	result := encounter.LocationArea.Name + " - "
+
 	methodIx := 0
 	methodsLen := len(methods)
 	for key, _ := range methods {
@@ -189,7 +334,6 @@ func CallLocationApi(ch chan string, encounter EncouterData, wg *sync.WaitGroup)
 			result += ", "
 		}
 	}
-	result += "\n"
 
 	ch <- result
 }
@@ -213,7 +357,7 @@ func CallApi(apiUrl string) ([]byte, error) {
 	}
 
 	if resp.StatusCode == 404 {
-		return nil, errors.New("No result is found.")
+		return nil, noResultErr
 	}
 
 	if resp.StatusCode != 200 {
