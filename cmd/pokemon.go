@@ -15,8 +15,6 @@ var pokemonCmd = &cobra.Command{
 
 		nameOrId, _ := cmd.Flags().GetString("query")
 
-		//i need to format the query string here
-
 		if len(nameOrId) == 0 {
 			fmt.Println("Please enter a pokemon name or id number.")
 		} else {

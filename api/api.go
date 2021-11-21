@@ -260,7 +260,7 @@ func GetEncounterLocation(encounterUrl string) []string {
 	encounterBytes, err := CallApi(encounterUrl)
 
 	if err != nil {
-		return []string{"-"}
+		return []string{""}
 	}
 
 	var encounters Encouters
